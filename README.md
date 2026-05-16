@@ -88,6 +88,11 @@ On every `POST /turns`, after persisting the raw turn, the service calls an LLM 
 
 Each extracted memory has a normalized `key` (e.g. `current_employer`, `pet_name`, `home_city`) that enables contradiction detection, a `value` as a human-readable statement, and a `confidence` score calibrated by how explicit vs. implicit the information was.
 
+**Key-slot normalization:** The LLM sometimes uses inconsistent keys for the 
+same concept across sessions (`job_change`, `employer`, `new_job`). A `KEY_SLOTS` 
+alias map normalizes these to canonical keys (`current_employer`) before 
+contradiction detection runs — without this, supersession silently fails.
+
 **Implicit facts** are extracted too. "Walking Biscuit this morning" → `{type: fact, key: pet_name, value: "has a dog named Biscuit", confidence: 0.80}`.
 
 **What we miss:** Gradual opinion shifts across many sessions (we detect single-session contradictions well, but subtle multi-session drift requires cross-session context that the extraction prompt doesn't have). Future improvement: a periodic re-summarization job across a user's recent memories.
@@ -126,7 +131,10 @@ The full chain is visible via `GET /users/{user_id}/memories` — both active an
 
 **Opinion evolution** is handled differently from fact contradiction. For `type=opinion`, we treat each update as a refinement rather than a binary flip — the new opinion's `value` is expected to contain more nuance than the old one (since it's extracted from a later conversation that presumably references the evolved state). We still supersede the old record, but the CHANGELOG documents the tradeoff: a production system should probably maintain an opinion arc rather than a single active value.
 
-**Corrections** (`type=correction`) are extracted as their own memory type and also trigger supersession of the fact they correct. The extraction prompt instructs the model to use the corrected fact's key so the FK resolves correctly.
+**Corrections** (`type=correction`) are extracted as their own memory type. 
+The extraction prompt instructs the model to use the corrected fact's normalized 
+key, so the same KEY_SLOTS normalization that handles employer aliases also 
+resolves corrections to the right slot.
 
 ## Tradeoffs
 
