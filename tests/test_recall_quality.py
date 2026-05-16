@@ -1,0 +1,194 @@
+"""
+Recall quality fixture test.
+Ingests scripted conversations, probes with questions, reports hit rate.
+
+Run: pytest tests/test_recall_quality.py -v -s
+"""
+import os
+import httpx
+import pytest
+
+BASE = os.getenv("SERVICE_URL", "http://localhost:8080")
+TIMEOUT = 70
+
+
+def client():
+    return httpx.Client(base_url=BASE, timeout=TIMEOUT)
+
+
+# ── Fixture definition ────────────────────────────────────────────────────────
+# Each scenario: conversation turns + probe queries + expected keywords
+
+SCENARIOS = [
+    {
+        "name": "basic_facts",
+        "user_id": "fixture-user-001",
+        "turns": [
+            {
+                "session_id": "fix-s1",
+                "messages": [
+                    {"role": "user", "content": "Hi! I'm Asel. I work as a product designer at Figma in San Francisco."},
+                    {"role": "assistant", "content": "Nice to meet you Asel! How long have you been at Figma?"},
+                    {"role": "user", "content": "About 2 years. I have a cat named Mochi who is very demanding."},
+                    {"role": "assistant", "content": "Ha! Cats do have a reputation for that."},
+                ],
+                "timestamp": "2025-01-10T09:00:00Z",
+            },
+        ],
+        "probes": [
+            {"query": "Where does this person work?", "expected": ["figma"]},
+            {"query": "What city does the user live in?", "expected": ["san francisco"]},
+            {"query": "What is the user's pet's name?", "expected": ["mochi"]},
+            {"query": "What is the user's job title?", "expected": ["designer"]},
+            {"query": "What is the user's name?", "expected": ["asel"]},
+        ],
+    },
+    {
+        "name": "implicit_facts",
+        "user_id": "fixture-user-002",
+        "turns": [
+            {
+                "session_id": "fix-s2",
+                "messages": [
+                    {"role": "user", "content": "Just got back from walking Biscuit in Riverside Park."},
+                    {"role": "assistant", "content": "Sounds like a lovely morning!"},
+                    {"role": "user", "content": "Yeah, and I can't eat gluten so I skipped the bagel cart."},
+                    {"role": "assistant", "content": "That must be tricky in NYC."},
+                ],
+                "timestamp": "2025-02-05T08:30:00Z",
+            },
+        ],
+        "probes": [
+            {"query": "Does this user have a dog? What is its name?", "expected": ["biscuit"]},
+            {"query": "What dietary restrictions does this user have?", "expected": ["gluten"]},
+            {"query": "What city does the user live in?", "expected": ["nyc", "new york"]},
+        ],
+    },
+    {
+        "name": "fact_evolution",
+        "user_id": "fixture-user-003",
+        "turns": [
+            {
+                "session_id": "fix-s3a",
+                "messages": [
+                    {"role": "user", "content": "I'm currently working at Amazon as a data scientist."},
+                    {"role": "assistant", "content": "That's a great role!"},
+                ],
+                "timestamp": "2025-01-01T00:00:00Z",
+            },
+            {
+                "session_id": "fix-s3b",
+                "messages": [
+                    {"role": "user", "content": "Big news — I just accepted an offer at Anthropic! Starting next month."},
+                    {"role": "assistant", "content": "Wow, congratulations!"},
+                ],
+                "timestamp": "2025-03-01T00:00:00Z",
+            },
+        ],
+        "probes": [
+            {"query": "Where does this user work?", "expected": ["anthropic"]},
+            {"query": "What is the user's job?", "expected": ["data scientist", "scientist"]},
+        ],
+    },
+    {
+        "name": "preferences_and_opinions",
+        "user_id": "fixture-user-004",
+        "turns": [
+            {
+                "session_id": "fix-s4",
+                "messages": [
+                    {"role": "user", "content": "I prefer Python for everything. TypeScript is fine but I always reach for Python first."},
+                    {"role": "assistant", "content": "Makes sense for data-heavy work!"},
+                    {"role": "user", "content": "Also I'm vegetarian and I'm training for a half marathon."},
+                    {"role": "assistant", "content": "That's a great combination of goals!"},
+                ],
+                "timestamp": "2025-02-15T14:00:00Z",
+            },
+        ],
+        "probes": [
+            {"query": "What is this user's preferred programming language?", "expected": ["python"]},
+            {"query": "What are the user's dietary preferences?", "expected": ["vegetarian"]},
+            {"query": "What sport or physical activity is this user doing?", "expected": ["marathon", "running"]},
+        ],
+    },
+    {
+        "name": "correction_handling",
+        "user_id": "fixture-user-005",
+        "turns": [
+            {
+                "session_id": "fix-s5",
+                "messages": [
+                    {"role": "user", "content": "I live in Brooklyn."},
+                    {"role": "assistant", "content": "Cool! Brooklyn has a great food scene."},
+                    {"role": "user", "content": "Actually wait, I meant Manhattan — I always mix those up. I'm in the Upper West Side."},
+                    {"role": "assistant", "content": "Ha, easy mistake. UWS is lovely!"},
+                ],
+                "timestamp": "2025-03-10T11:00:00Z",
+            },
+        ],
+        "probes": [
+            {"query": "Where does this user live?", "expected": ["manhattan", "upper west side"]},
+        ],
+    },
+]
+
+
+def test_recall_quality_fixture():
+    c = client()
+    total_probes = 0
+    passed_probes = 0
+    failures = []
+
+    for scenario in SCENARIOS:
+        user_id = scenario["user_id"]
+        c.delete(f"/users/{user_id}")
+
+        for i, turn in enumerate(scenario["turns"]):
+            r = c.post("/turns", json={
+                "session_id": turn["session_id"],
+                "user_id": user_id,
+                "messages": turn["messages"],
+                "timestamp": turn["timestamp"],
+                "metadata": {},
+            })
+            assert r.status_code == 201, f"Ingest failed for {scenario['name']} turn {i}: {r.text}"
+
+        for probe in scenario["probes"]:
+            total_probes += 1
+            r = c.post("/recall", json={
+                "query": probe["query"],
+                "session_id": "fixture-probe-session",
+                "user_id": user_id,
+                "max_tokens": 512,
+            })
+            assert r.status_code == 200
+            context = r.json()["context"].lower()
+
+            found = any(kw.lower() in context for kw in probe["expected"])
+            if found:
+                passed_probes += 1
+                print(f"  ✓ [{scenario['name']}] {probe['query'][:60]}")
+            else:
+                failures.append({
+                    "scenario": scenario["name"],
+                    "query": probe["query"],
+                    "expected": probe["expected"],
+                    "context_preview": r.json()["context"][:200],
+                })
+                print(f"  ✗ [{scenario['name']}] {probe['query'][:60]}")
+                print(f"    expected one of: {probe['expected']}")
+                print(f"    context: {r.json()['context'][:200]}")
+
+        c.delete(f"/users/{user_id}")
+
+    score = passed_probes / total_probes if total_probes else 0
+    print(f"\n{'='*50}")
+    print(f"Recall quality: {passed_probes}/{total_probes} ({score:.0%})")
+    print(f"{'='*50}")
+
+    if failures:
+        print("\nFailures:")
+        for f in failures:
+            print(f"  - [{f['scenario']}] {f['query']}")
+
+    assert score >= 0.70, f"Recall quality {score:.0%} below threshold 70% ({passed_probes}/{total_probes})"
